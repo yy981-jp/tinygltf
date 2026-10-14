@@ -567,12 +567,16 @@ STBIWDEF int stbi_write_bmp(char const *filename, int x, int y, int comp, const 
 
 static int stbi_write_tga_core(stbi__write_context *s, int x, int y, int comp, void *data)
 {
+   int has_alpha;
+   int colorbytes;
+   int format;
+
    if (!stbiw__image_size_valid(x, y, comp) || data == NULL)
       return 0;
 
-   int has_alpha = (comp == 2 || comp == 4);
-   int colorbytes = has_alpha ? comp-1 : comp;
-   int format = colorbytes < 2 ? 3 : 2; // 3 color channels (RGB/RGBA) = 2, 1 color channel (Y/YA) = 3
+   has_alpha = (comp == 2 || comp == 4);
+   colorbytes = has_alpha ? comp-1 : comp;
+   format = colorbytes < 2 ? 3 : 2; // 3 color channels (RGB/RGBA) = 2, 1 color channel (Y/YA) = 3
 
    if (!stbi_write_tga_with_rle) {
       return stbiw__outfile(s, -1, -1, x, y, comp, 0, (void *) data, has_alpha, 0,
@@ -1188,6 +1192,8 @@ STBIWDEF unsigned char *stbi_write_png_to_mem(const unsigned char *pixels, int s
    if (stride_bytes == 0)
       stride_bytes = row_bytes;
    else if (stride_bytes < row_bytes)
+      return NULL;
+   if (!stbiw__mul_valid(stride_bytes, y))
       return NULL;
 
    if (!stbiw__add_valid(row_bytes, 1))
