@@ -808,7 +808,7 @@ static int stbi_write_hdr_core(stbi__write_context *s, int x, int y, int comp, f
       return 0;
 
    // Each component is stored separately. Allocate scratch space for full output scanline.
-   scratch = (unsigned char *) STBIW_MALLOC(x * 4);
+   scratch = (unsigned char *) STBIW_MALLOC((size_t)x * 4);
    if (scratch == NULL)
       return 0;
    {
@@ -1552,10 +1552,6 @@ static int stbiw__jpg_processDU(stbi__write_context *s, int *bitBuf, int *bitCnt
 }
 
 static int stbi_write_jpg_core(stbi__write_context *s, int width, int height, int comp, const void* data, int quality) {
-   if (!stbiw__image_size_valid(width, height, comp) || data == NULL ||
-       width > 65535 || height > 65535)
-      return 0;
-
    // Constants that don't pollute global namespace
    static const unsigned char std_dc_luminance_nrcodes[] = {0,0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0};
    static const unsigned char std_dc_luminance_values[] = {0,1,2,3,4,5,6,7,8,9,10,11};
@@ -1631,9 +1627,9 @@ static int stbi_write_jpg_core(stbi__write_context *s, int width, int height, in
    float fdtbl_Y[64], fdtbl_UV[64];
    unsigned char YTable[64], UVTable[64];
 
-   if(!data || !width || !height || comp > 4 || comp < 1) {
+   if (!stbiw__image_size_valid(width, height, comp) || data == NULL ||
+       width > 65535 || height > 65535)
       return 0;
-   }
 
    quality = quality ? quality : 90;
    subsample = quality <= 90 ? 1 : 0;
