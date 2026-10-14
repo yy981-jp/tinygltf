@@ -1056,7 +1056,7 @@ static void *stbi__malloc_mad3(int a, int b, int c, int add)
    return stbi__malloc(a*b*c + add);
 }
 
-#if !defined(STBI_NO_LINEAR) || !defined(STBI_NO_HDR) || !defined(STBI_NO_PNM)
+#if !defined(STBI_NO_LINEAR) || !defined(STBI_NO_HDR) || !defined(STBI_NO_PNM) || !defined(STBI_NO_PNG) || !defined(STBI_NO_PSD)
 static void *stbi__malloc_mad4(int a, int b, int c, int d, int add)
 {
    if (!stbi__mad4sizes_valid(a, b, c, d, add)) return NULL;
