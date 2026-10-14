@@ -215,6 +215,7 @@ STBIWDEF void stbi_flip_vertically_on_write(int flip_boolean);
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 
 #if defined(STBIW_MALLOC) && defined(STBIW_FREE) && (defined(STBIW_REALLOC) || defined(STBIW_REALLOC_SIZED))
 // ok
@@ -234,6 +235,26 @@ STBIWDEF void stbi_flip_vertically_on_write(int flip_boolean);
 #define STBIW_REALLOC_SIZED(p,oldsz,newsz) STBIW_REALLOC(p,newsz)
 #endif
 
+// Validate size calculations before evaluating multiplications or additions.
+// stb_image_write uses int for dimensions, row strides, and several internal sizes.
+static int stbiw__mul_valid(int a, int b)
+{
+   if (a < 0 || b < 0) return 0;
+   if (b == 0) return 1;
+   return a <= INT_MAX / b;
+}
+
+static int stbiw__add_valid(int a, int b)
+{
+   if (a < 0 || b < 0) return 0;
+   return a <= INT_MAX - b;
+}
+
+static int stbiw__image_size_valid(int x, int y, int comp)
+{
+   return x > 0 && y > 0 && comp >= 1 && comp <= 4 &&
+      stbiw__mul_valid(x, comp) && stbiw__mul_valid(x * comp, y);
+}
 
 #ifndef STBIW_MEMMOVE
 #define STBIW_MEMMOVE(a,b,sz) memmove(a,b,sz)
@@ -491,21 +512,36 @@ static int stbiw__outfile(stbi__write_context *s, int rgb_dir, int vdir, int x, 
 
 static int stbi_write_bmp_core(stbi__write_context *s, int x, int y, int comp, const void *data)
 {
+   int image_size;
+   if (!stbiw__image_size_valid(x, y, comp) || data == NULL)
+      return 0;
+
    if (comp != 4) {
-      // write RGB bitmap
-      int pad = (-x*3) & 3;
+      int row_bytes, pad;
+      // write RGB bitmap, with each row padded to a 4-byte boundary
+      if (!stbiw__mul_valid(x, 3)) return 0;
+      row_bytes = x * 3;
+      pad = (4 - (row_bytes & 3)) & 3;
+      if (!stbiw__add_valid(row_bytes, pad) ||
+          !stbiw__mul_valid(row_bytes + pad, y))
+         return 0;
+      image_size = (row_bytes + pad) * y;
+      if (!stbiw__add_valid(image_size, 54)) return 0;
+
       return stbiw__outfile(s,-1,-1,x,y,comp,1,(void *) data,0,pad,
               "11 4 22 4" "4 44 22 444444",
-              'B', 'M', 14+40+(x*3+pad)*y, 0,0, 14+40,  // file header
-               40, x,y, 1,24, 0,0,0,0,0,0);             // bitmap header
+              'B', 'M', 54 + image_size, 0,0, 14+40,
+               40, x,y, 1,24, 0,0,0,0,0,0);
    } else {
       // RGBA bitmaps need a v4 header
       // use BI_BITFIELDS mode with 32bpp and alpha mask
       // (straight BI_RGB with alpha mask doesn't work in most readers)
+      image_size = x * y * 4;
+      if (!stbiw__add_valid(image_size, 122)) return 0;
       return stbiw__outfile(s,-1,-1,x,y,comp,1,(void *)data,1,0,
          "11 4 22 4" "4 44 22 444444 4444 4 444 444 444 444",
-         'B', 'M', 14+108+x*y*4, 0, 0, 14+108, // file header
-         108, x,y, 1,32, 3,0,0,0,0,0, 0xff0000,0xff00,0xff,0xff000000u, 0, 0,0,0, 0,0,0, 0,0,0, 0,0,0); // bitmap V4 header
+         'B', 'M', 122 + image_size, 0, 0, 14+108,
+         108, x,y, 1,32, 3,0,0,0,0,0, 0xff0000,0xff00,0xff,0xff000000u, 0, 0,0,0, 0,0,0, 0,0,0, 0,0,0);
    }
 }
 
@@ -531,12 +567,12 @@ STBIWDEF int stbi_write_bmp(char const *filename, int x, int y, int comp, const 
 
 static int stbi_write_tga_core(stbi__write_context *s, int x, int y, int comp, void *data)
 {
+   if (!stbiw__image_size_valid(x, y, comp) || data == NULL)
+      return 0;
+
    int has_alpha = (comp == 2 || comp == 4);
    int colorbytes = has_alpha ? comp-1 : comp;
    int format = colorbytes < 2 ? 3 : 2; // 3 color channels (RGB/RGBA) = 2, 1 color channel (Y/YA) = 3
-
-   if (y < 0 || x < 0)
-      return 0;
 
    if (!stbi_write_tga_with_rle) {
       return stbiw__outfile(s, -1, -1, x, y, comp, 0, (void *) data, has_alpha, 0,
@@ -760,12 +796,18 @@ static void stbiw__write_hdr_scanline(stbi__write_context *s, int width, int nco
 
 static int stbi_write_hdr_core(stbi__write_context *s, int x, int y, int comp, float *data)
 {
-   if (y <= 0 || x <= 0 || data == NULL)
+   unsigned char *scratch;
+   int i, len;
+
+   if (!stbiw__image_size_valid(x, y, comp) || data == NULL ||
+       !stbiw__mul_valid(x, 4))
       return 0;
-   else {
-      // Each component is stored separately. Allocate scratch space for full output scanline.
-      unsigned char *scratch = (unsigned char *) STBIW_MALLOC(x*4);
-      int i, len;
+
+   // Each component is stored separately. Allocate scratch space for full output scanline.
+   scratch = (unsigned char *) STBIW_MALLOC(x * 4);
+   if (scratch == NULL)
+      return 0;
+   {
       char buffer[128];
       char header[] = "#?RADIANCE\n# Written by stb_image_write.h\nFORMAT=32-bit_rle_rgbe\n";
       s->func(s->context, header, sizeof(header)-1);
@@ -1128,21 +1170,43 @@ static void stbiw__encode_png_line(unsigned char *pixels, int stride_bytes, int 
 STBIWDEF unsigned char *stbi_write_png_to_mem(const unsigned char *pixels, int stride_bytes, int x, int y, int n, int *out_len)
 {
    int force_filter = stbi_write_force_png_filter;
+   int row_bytes, filtered_row_bytes, filtered_size, output_size;
    int ctype[5] = { -1, 0, 4, 2, 6 };
    unsigned char sig[8] = { 137,80,78,71,13,10,26,10 };
    unsigned char *out,*o, *filt, *zlib;
    signed char *line_buffer;
    int j,zlen;
 
+   if (out_len == NULL)
+      return NULL;
+   *out_len = 0;
+   if (pixels == NULL || x <= 0 || y <= 0 || n < 1 || n > 4 ||
+       stride_bytes < 0 || !stbiw__mul_valid(x, n))
+      return NULL;
+
+   row_bytes = x * n;
    if (stride_bytes == 0)
-      stride_bytes = x * n;
+      stride_bytes = row_bytes;
+   else if (stride_bytes < row_bytes)
+      return NULL;
+
+   if (!stbiw__add_valid(row_bytes, 1))
+      return NULL;
+   filtered_row_bytes = row_bytes + 1;
+   if (!stbiw__mul_valid(filtered_row_bytes, y))
+      return NULL;
+   filtered_size = filtered_row_bytes * y;
+   if (!stbiw__mul_valid(row_bytes, y))
+      return NULL;
 
    if (force_filter >= 5) {
       force_filter = -1;
    }
 
-   filt = (unsigned char *) STBIW_MALLOC((x*n+1) * y); if (!filt) return 0;
-   line_buffer = (signed char *) STBIW_MALLOC(x * n); if (!line_buffer) { STBIW_FREE(filt); return 0; }
+   filt = (unsigned char *) STBIW_MALLOC(filtered_size);
+   if (!filt) return NULL;
+   line_buffer = (signed char *) STBIW_MALLOC(row_bytes);
+   if (!line_buffer) { STBIW_FREE(filt); return NULL; }
    for (j=0; j < y; ++j) {
       int filter_type;
       if (force_filter > -1) {
@@ -1173,14 +1237,19 @@ STBIWDEF unsigned char *stbi_write_png_to_mem(const unsigned char *pixels, int s
       STBIW_MEMMOVE(filt+j*(x*n+1)+1, line_buffer, x*n);
    }
    STBIW_FREE(line_buffer);
-   zlib = stbi_zlib_compress(filt, y*( x*n+1), &zlen, stbi_write_png_compression_level);
+   zlib = stbi_zlib_compress(filt, filtered_size, &zlen, stbi_write_png_compression_level);
    STBIW_FREE(filt);
-   if (!zlib) return 0;
+   if (!zlib) return NULL;
+   if (zlen < 0 || !stbiw__add_valid(zlen, 57)) {
+      STBIW_FREE(zlib);
+      return NULL;
+   }
+   output_size = 57 + zlen;
 
    // each tag requires 12 bytes of overhead
-   out = (unsigned char *) STBIW_MALLOC(8 + 12+13 + 12+zlen + 12);
-   if (!out) return 0;
-   *out_len = 8 + 12+13 + 12+zlen + 12;
+   out = (unsigned char *) STBIW_MALLOC(output_size);
+   if (!out) { STBIW_FREE(zlib); return NULL; }
+   *out_len = output_size;
 
    o=out;
    STBIW_MEMMOVE(o,sig,8); o+= 8;
@@ -1396,6 +1465,10 @@ static int stbiw__jpg_processDU(stbi__write_context *s, int *bitBuf, int *bitCnt
 }
 
 static int stbi_write_jpg_core(stbi__write_context *s, int width, int height, int comp, const void* data, int quality) {
+   if (!stbiw__image_size_valid(width, height, comp) || data == NULL ||
+       width > 65535 || height > 65535)
+      return 0;
+
    // Constants that don't pollute global namespace
    static const unsigned char std_dc_luminance_nrcodes[] = {0,0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0};
    static const unsigned char std_dc_luminance_values[] = {0,1,2,3,4,5,6,7,8,9,10,11};
