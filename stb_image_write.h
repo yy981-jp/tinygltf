@@ -871,8 +871,41 @@ STBIWDEF int stbi_write_hdr(char const *filename, int x, int y, int comp, const 
 
 static void *stbiw__sbgrowf(void **arr, int increment, int itemsize)
 {
-   int m = *arr ? 2*stbiw__sbm(*arr)+increment : increment+1;
-   void *p = STBIW_REALLOC_SIZED(*arr ? stbiw__sbraw(*arr) : 0, *arr ? (stbiw__sbm(*arr)*itemsize + sizeof(int)*2) : 0, itemsize * m + sizeof(int)*2);
+   int old_capacity, m, old_size, new_size;
+   void *p;
+
+   if (arr == NULL || increment < 0 || itemsize <= 0)
+      return NULL;
+
+   old_capacity = *arr ? stbiw__sbm(*arr) : 0;
+   if (old_capacity < 0)
+      return NULL;
+
+   if (*arr) {
+      if (!stbiw__add_valid(old_capacity, old_capacity))
+         return NULL;
+      m = old_capacity + old_capacity;
+      if (!stbiw__add_valid(m, increment))
+         return NULL;
+      m += increment;
+
+      if (!stbiw__mul_valid(old_capacity, itemsize) ||
+          !stbiw__add_valid(old_capacity * itemsize, (int)(sizeof(int) * 2)))
+         return NULL;
+      old_size = old_capacity * itemsize + (int)(sizeof(int) * 2);
+   } else {
+      if (!stbiw__add_valid(increment, 1))
+         return NULL;
+      m = increment + 1;
+      old_size = 0;
+   }
+
+   if (m <= 0 || !stbiw__mul_valid(itemsize, m) ||
+       !stbiw__add_valid(itemsize * m, (int)(sizeof(int) * 2)))
+      return NULL;
+   new_size = itemsize * m + (int)(sizeof(int) * 2);
+
+   p = STBIW_REALLOC_SIZED(*arr ? stbiw__sbraw(*arr) : 0, old_size, new_size);
    STBIW_ASSERT(p);
    if (p) {
       if (!*arr) ((int *) p)[1] = 0;
