@@ -1033,7 +1033,7 @@ static int stbi__mad3sizes_valid(int a, int b, int c, int add)
 }
 
 // returns 1 if "a*b*c*d + add" has no negative terms/factors and doesn't overflow
-#if !defined(STBI_NO_LINEAR) || !defined(STBI_NO_HDR) || !defined(STBI_NO_PNM)
+#if !defined(STBI_NO_LINEAR) || !defined(STBI_NO_HDR) || !defined(STBI_NO_PNM) || !defined(STBI_NO_PNG) || !defined(STBI_NO_PSD)
 static int stbi__mad4sizes_valid(int a, int b, int c, int d, int add)
 {
    return stbi__mul2sizes_valid(a, b) && stbi__mul2sizes_valid(a*b, c) &&
@@ -1188,9 +1188,15 @@ static void *stbi__load_main(stbi__context *s, int *x, int *y, int *comp, int re
 static stbi_uc *stbi__convert_16_to_8(stbi__uint16 *orig, int w, int h, int channels)
 {
    int i;
-   int img_len = w * h * channels;
+   int img_len;
    stbi_uc *reduced;
 
+   if (!stbi__mad3sizes_valid(w, h, channels, 0)) {
+      STBI_FREE(orig);
+      return stbi__errpuc("outofmem", "Out of memory (size too large)");
+   }
+
+   img_len = w * h * channels;
    reduced = (stbi_uc *) stbi__malloc(img_len);
    if (reduced == NULL) return stbi__errpuc("outofmem", "Out of memory");
 
@@ -1204,11 +1210,20 @@ static stbi_uc *stbi__convert_16_to_8(stbi__uint16 *orig, int w, int h, int chan
 static stbi__uint16 *stbi__convert_8_to_16(stbi_uc *orig, int w, int h, int channels)
 {
    int i;
-   int img_len = w * h * channels;
+   int img_len;
    stbi__uint16 *enlarged;
 
-   enlarged = (stbi__uint16 *) stbi__malloc(img_len*2);
-   if (enlarged == NULL) return (stbi__uint16 *) stbi__errpuc("outofmem", "Out of memory");
+   if (!stbi__mad3sizes_valid(w, h, channels * 2, 0)) {
+      STBI_FREE(orig);
+      return (stbi__uint16 *) stbi__errpuc("outofmem", "Out of memory (size too large)");
+   }
+
+   img_len = w * h * channels;
+   enlarged = (stbi__uint16 *) stbi__malloc_mad3(w, h, channels * 2, 0);
+   if (enlarged == NULL) {
+      STBI_FREE(orig);
+      return (stbi__uint16 *) stbi__errpuc("outofmem", "Out of memory");
+   }
 
    for (i = 0; i < img_len; ++i)
       enlarged[i] = (stbi__uint16)((orig[i] << 8) + orig[i]); // replicate to high and low byte, maps 0->0, 255->0xffff
@@ -1815,7 +1830,7 @@ static stbi__uint16 *stbi__convert_format16(stbi__uint16 *data, int img_n, int r
    if (req_comp == img_n) return data;
    STBI_ASSERT(req_comp >= 1 && req_comp <= 4);
 
-   good = (stbi__uint16 *) stbi__malloc(req_comp * x * y * 2);
+   good = (stbi__uint16 *) stbi__malloc_mad4(req_comp, x, y, 2, 0);
    if (good == NULL) {
       STBI_FREE(data);
       return (stbi__uint16 *) stbi__errpuc("outofmem", "Out of memory");
