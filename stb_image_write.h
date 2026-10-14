@@ -861,13 +861,22 @@ STBIWDEF int stbi_write_hdr(char const *filename, int x, int y, int comp, const 
 #define stbiw__sbm(a)   stbiw__sbraw(a)[0]
 #define stbiw__sbn(a)   stbiw__sbraw(a)[1]
 
-#define stbiw__sbneedgrow(a,n)  ((a)==0 || stbiw__sbn(a)+n >= stbiw__sbm(a))
+#define stbiw__sbneedgrow(a,n)  ((a)==0 || stbiw__sbm(a)<0 || (n)<0 || stbiw__sbn(a)>INT_MAX-(n) || stbiw__sbn(a)+(n)>=stbiw__sbm(a))
 #define stbiw__sbmaybegrow(a,n) (stbiw__sbneedgrow(a,(n)) ? stbiw__sbgrow(a,n) : 0)
 #define stbiw__sbgrow(a,n)  stbiw__sbgrowf((void **) &(a), (n), sizeof(*(a)))
 
-#define stbiw__sbpush(a, v)      (stbiw__sbmaybegrow(a,1), (a)[stbiw__sbn(a)++] = (v))
-#define stbiw__sbcount(a)        ((a) ? stbiw__sbn(a) : 0)
+#define stbiw__sbpush(a, v)      (stbiw__sbmaybegrow(a,1), ((a) != NULL && stbiw__sbm(a) >= 0 && stbiw__sbn(a) < stbiw__sbm(a) ? ((a)[stbiw__sbn(a)++] = (v), 1) : 0))
+#define stbiw__sbcount(a)        ((a) && stbiw__sbm(a) >= 0 ? stbiw__sbn(a) : 0)
 #define stbiw__sbfree(a)         ((a) ? STBIW_FREE(stbiw__sbraw(a)),0 : 0)
+
+static void *stbiw__sbgrowfail(void **arr)
+{
+   if (arr != NULL && *arr != NULL) {
+      stbiw__sbm(*arr) = -1;
+      return *arr;
+   }
+   return NULL;
+}
 
 static void *stbiw__sbgrowf(void **arr, int increment, int itemsize)
 {
@@ -875,43 +884,45 @@ static void *stbiw__sbgrowf(void **arr, int increment, int itemsize)
    void *p;
 
    if (arr == NULL || increment < 0 || itemsize <= 0)
-      return NULL;
+      return stbiw__sbgrowfail(arr);
 
    old_capacity = *arr ? stbiw__sbm(*arr) : 0;
    if (old_capacity < 0)
-      return NULL;
+      return *arr;
 
    if (*arr) {
       if (!stbiw__add_valid(old_capacity, old_capacity))
-         return NULL;
+         return stbiw__sbgrowfail(arr);
       m = old_capacity + old_capacity;
       if (!stbiw__add_valid(m, increment))
-         return NULL;
+         return stbiw__sbgrowfail(arr);
       m += increment;
 
       if (!stbiw__mul_valid(old_capacity, itemsize) ||
           !stbiw__add_valid(old_capacity * itemsize, (int)(sizeof(int) * 2)))
-         return NULL;
+         return stbiw__sbgrowfail(arr);
       old_size = old_capacity * itemsize + (int)(sizeof(int) * 2);
    } else {
       if (!stbiw__add_valid(increment, 1))
-         return NULL;
+         return stbiw__sbgrowfail(arr);
       m = increment + 1;
       old_size = 0;
    }
 
    if (m <= 0 || !stbiw__mul_valid(itemsize, m) ||
        !stbiw__add_valid(itemsize * m, (int)(sizeof(int) * 2)))
-      return NULL;
+      return stbiw__sbgrowfail(arr);
    new_size = itemsize * m + (int)(sizeof(int) * 2);
 
    p = STBIW_REALLOC_SIZED(*arr ? stbiw__sbraw(*arr) : 0, old_size, new_size);
-   STBIW_ASSERT(p);
-   if (p) {
-      if (!*arr) ((int *) p)[1] = 0;
-      *arr = (void *) ((int *) p + 2);
-      stbiw__sbm(*arr) = m;
+   if (p == NULL) {
+      void *failed = stbiw__sbgrowfail(arr);
+      STBIW_ASSERT(p);
+      return failed;
    }
+   if (!*arr) ((int *) p)[1] = 0;
+   *arr = (void *) ((int *) p + 2);
+   stbiw__sbm(*arr) = m;
    return *arr;
 }
 
@@ -983,8 +994,14 @@ STBIWDEF unsigned char * stbi_zlib_compress(unsigned char *data, int data_len, i
    static unsigned char  disteb[]  = { 0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13 };
    unsigned int bitbuf=0;
    int i,j, bitcount=0;
+   int block_count, fallback_limit;
    unsigned char *out = NULL;
-   unsigned char ***hash_table = (unsigned char***) STBIW_MALLOC(stbiw__ZHASH * sizeof(unsigned char**));
+   unsigned char ***hash_table;
+
+   if (out_len == NULL || data_len < 0 || (data_len > 0 && data == NULL))
+      return NULL;
+   *out_len = 0;
+   hash_table = (unsigned char***) STBIW_MALLOC(stbiw__ZHASH * sizeof(unsigned char**));
    if (hash_table == NULL)
       return NULL;
    if (quality < 5) quality = 5;
@@ -1060,8 +1077,23 @@ STBIWDEF unsigned char * stbi_zlib_compress(unsigned char *data, int data_len, i
       (void) stbiw__sbfree(hash_table[i]);
    STBIW_FREE(hash_table);
 
+   if (out == NULL || stbiw__sbm(out) < 0) {
+      (void) stbiw__sbfree(out);
+      return NULL;
+   }
+
+   // Calculate the worst-case stored-block size without overflowing int.
+   block_count = data_len / 32767 + ((data_len % 32767) != 0);
+   if (!stbiw__mul_valid(block_count, 5) ||
+       !stbiw__add_valid(data_len, 2) ||
+       !stbiw__add_valid(data_len + 2, block_count * 5)) {
+      (void) stbiw__sbfree(out);
+      return NULL;
+   }
+   fallback_limit = data_len + 2 + block_count * 5;
+
    // store uncompressed instead if compression was worse
-   if (stbiw__sbn(out) > data_len + 2 + ((data_len+32766)/32767)*5) {
+   if (stbiw__sbn(out) > fallback_limit) {
       stbiw__sbn(out) = 2;  // truncate to DEFLATE 32K window and FLEVEL = 1
       for (j = 0; j < data_len;) {
          int blocklen = data_len - j;
@@ -1071,6 +1103,18 @@ STBIWDEF unsigned char * stbi_zlib_compress(unsigned char *data, int data_len, i
          stbiw__sbpush(out, STBIW_UCHAR(blocklen >> 8));
          stbiw__sbpush(out, STBIW_UCHAR(~blocklen)); // NLEN
          stbiw__sbpush(out, STBIW_UCHAR(~blocklen >> 8));
+         if (out == NULL || stbiw__sbm(out) < 0 ||
+             stbiw__sbn(out) > INT_MAX - blocklen) {
+            (void) stbiw__sbfree(out);
+            return NULL;
+         }
+         stbiw__sbmaybegrow(out, blocklen);
+         if (out == NULL || stbiw__sbm(out) < 0 ||
+             stbiw__sbn(out) > INT_MAX - blocklen ||
+             stbiw__sbn(out) + blocklen >= stbiw__sbm(out)) {
+            (void) stbiw__sbfree(out);
+            return NULL;
+         }
          memcpy(out+stbiw__sbn(out), data+j, blocklen);
          stbiw__sbn(out) += blocklen;
          j += blocklen;
@@ -1092,6 +1136,10 @@ STBIWDEF unsigned char * stbi_zlib_compress(unsigned char *data, int data_len, i
       stbiw__sbpush(out, STBIW_UCHAR(s2));
       stbiw__sbpush(out, STBIW_UCHAR(s1 >> 8));
       stbiw__sbpush(out, STBIW_UCHAR(s1));
+   }
+   if (out == NULL || stbiw__sbm(out) < 0) {
+      (void) stbiw__sbfree(out);
+      return NULL;
    }
    *out_len = stbiw__sbn(out);
    // make returned pointer freeable
